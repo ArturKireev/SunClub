@@ -1,5 +1,5 @@
 import { h, icon, openModal, parseMoney, rubInput, toast } from '../ui.js';
-import { money } from '../shared/billing.js';
+import { money } from '../core/billing.js';
 import { store } from '../store.js';
 
 const METHODS = [

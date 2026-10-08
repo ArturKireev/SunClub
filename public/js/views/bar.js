@@ -1,7 +1,7 @@
 import { h, icon, toast } from '../ui.js';
 import { post } from '../api.js';
 import { store, loadState, productById } from '../store.js';
-import { money } from '../shared/billing.js';
+import { money } from '../core/billing.js';
 import { openPayDialog } from './pay.js';
 
 const cart = new Map(); // product_id → qty

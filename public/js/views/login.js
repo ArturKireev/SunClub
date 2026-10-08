@@ -18,7 +18,9 @@ export async function renderLogin(root, onDone) {
       h('button', { class: 'btn user-btn', onclick: () => showPin(u) },
         h('span', { class: 'avatar' }, u.name.trim()[0]?.toUpperCase() || '?'),
         h('span', { class: 'grow' }, u.name),
-        h('span', { class: 'muted', style: { fontSize: '13px' } }, u.role === 'admin' ? 'админ' : 'сотрудник')))));
+        u.must_change ? h('span', { class: 'chip warn' }, 'первый вход') : null,
+        h('span', { class: 'muted', style: { fontSize: '13px' } }, u.role === 'admin' ? 'админ' : 'сотрудник'))),
+      users.some((u) => u.must_change) ? h('p', { class: 'muted', style: { fontSize: '13px', margin: '8px 0 0' } }, 'Начальные PIN: администраторы — 1111 и 2222, сотрудники — 1001, 1002, 1003. При первом входе задайте свой.') : null));
   }
 
   function showPin(u) {

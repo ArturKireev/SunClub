@@ -1,7 +1,7 @@
 import { h, icon, formDialog, openModal, fmtDateTime, rubInput, toast } from '../ui.js';
 import { get, post, patch } from '../api.js';
 import { store, loadState } from '../store.js';
-import { money } from '../shared/billing.js';
+import { money } from '../core/billing.js';
 
 const REASONS = { receipt: 'Приход', writeoff: 'Списание', inventory: 'Инвентаризация', sale: 'Продажа', return: 'Возврат в чек', cancel: 'Отмена чека', refund: 'Возврат', initial: 'Начальный остаток' };
 

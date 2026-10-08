@@ -1,7 +1,8 @@
 import { h, icon, formDialog, openModal, confirmDialog, fmtDateTime, fmtTime, rubInput, toast } from '../ui.js';
 import { get, post } from '../api.js';
 import { store, act, loadState, isAdmin, now } from '../store.js';
-import { money, durationHuman } from '../shared/billing.js';
+import { downloadBackup } from '../backup.js';
+import { money, durationHuman } from '../core/billing.js';
 
 const METHOD = { cash: 'Наличные', card: 'Карта', sbp: 'QR / СБП' };
 
@@ -55,6 +56,7 @@ async function closeShift() {
   });
   if (ok) {
     await loadState();
+    downloadBackup();
     openModal({ title: 'Смена закрыта', size: 'wide', render: () => shiftDetails(summary) });
   }
 }
@@ -76,7 +78,7 @@ export const shiftView = {
     const s = state.shift;
     const history = await get('/api/shifts');
     return h('div', { class: 'stack' },
-      h('div', { class: 'page-head' }, h('h1', null, 'Смена')),
+      h('div', { class: 'page-head' }, h('h1', null, 'Смена'), h('span', { class: 'chip' }, `План: ${state.settings.shift_start}–${state.settings.shift_end}`)),
       s ? h('div', { class: 'stack' },
         shiftDetails(s),
         h('div', { class: 'row wrap' },

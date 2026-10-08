@@ -1,8 +1,8 @@
-import { DatabaseSync } from 'node:sqlite';
-import { randomBytes } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { hashPin } from './auth.js';
+import { hashPin, randomHex } from './auth.js';
+
+// Работает с любым адаптером SQLite с интерфейсом node:sqlite:
+//   db.exec(sql), db.prepare(sql) -> { run(...a), get(...a), all(...a) }
+// (в Node это DatabaseSync, в браузере — обёртка над sql.js, см. sqljs-db.js).
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -152,17 +152,16 @@ export const DEFAULT_SETTINGS = {
   sbp_qr: '',             // data:URL картинки QR-кода СБП
   sbp_note: '',           // подпись к QR (телефон / получатель)
   hw_key: '',             // ключ доступа для контроллера ламп
+  shift_start: '10:00',   // плановое начало смены
+  shift_end: '22:00',     // плановый конец смены
 };
 
-export function openDb(path) {
-  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec('PRAGMA foreign_keys = ON;');
-  if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
+/** Создаёт таблицы и настройки по умолчанию (идемпотентно). */
+export function initDb(db) {
   db.exec(SCHEMA);
   const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) ins.run(k, v);
-  db.prepare("UPDATE settings SET value=? WHERE key='hw_key' AND value=''").run(randomBytes(16).toString('hex'));
+  db.prepare("UPDATE settings SET value=? WHERE key='hw_key' AND value=''").run(randomHex(16));
   return db;
 }
 
@@ -179,7 +178,7 @@ export function tx(db, fn) {
 }
 
 /** Начальные данные для пустой базы: 2 админа, 3 сотрудника, столы и меню. Все PIN нужно сменить при первом входе. */
-export function seedIfEmpty(db, log = () => {}) {
+export async function seedIfEmpty(db, log = () => {}) {
   if (db.prepare('SELECT COUNT(*) c FROM users').get().c > 0) return;
   const now = Date.now();
   const users = [
@@ -190,8 +189,9 @@ export function seedIfEmpty(db, log = () => {}) {
     ['Сотрудник 3', 'worker', '1003'],
   ];
   const iu = db.prepare('INSERT INTO users(name,role,pin_hash,must_change,created_at) VALUES (?,?,?,1,?)');
-  for (const [n, r, p] of users) {
-    iu.run(n, r, hashPin(p), now);
+  const hashes = await Promise.all(users.map(([, , p]) => hashPin(p)));
+  for (const [i, [n, r, p]] of users.entries()) {
+    iu.run(n, r, hashes[i], now);
     log(`  ${n} (${r === 'admin' ? 'админ' : 'сотрудник'}): PIN ${p}`);
   }
   const it = db.prepare('INSERT INTO tables(name,kind,rate_kop,sort) VALUES (?,?,?,?)');

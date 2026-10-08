@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { timeCharge, playSeconds, checkTotals } from '../public/js/shared/billing.js';
+import { timeCharge, playSeconds, checkTotals } from '../public/js/core/billing.js';
 
 const RATE = 60000; // 600 ₽/час
 

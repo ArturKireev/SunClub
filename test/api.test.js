@@ -1,18 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { openDb, seedIfEmpty } from '../server/db.js';
-import { createLamps } from '../server/lamps.js';
-import { createApp } from '../server/app.js';
+import { DatabaseSync } from 'node:sqlite';
+import { initDb, seedIfEmpty } from '../public/js/core/db.js';
+import { createLamps } from '../public/js/core/lamps.js';
+import { createCore } from '../public/js/core/api.js';
+import { createHttpApp } from '../server/http.js';
 
 let clock = Date.parse('2026-01-01T10:00:00Z');
 const lampCalls = [];
 
 async function boot() {
-  const db = openDb(':memory:');
-  seedIfEmpty(db);
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON;');
+  initDb(db);
+  await seedIfEmpty(db);
   const fetchImpl = async (url) => { lampCalls.push(url); return { ok: true }; };
-  const app = createApp({ db, lamps: createLamps(db, { fetchImpl }), publicDir: new URL('../public', import.meta.url).pathname, now: () => clock });
+  const core = createCore({ db, lamps: createLamps(db, { fetchImpl }), now: () => clock });
+  const app = createHttpApp({ core, publicDir: new URL('../public', import.meta.url).pathname });
   const server = createServer(app.handle);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;

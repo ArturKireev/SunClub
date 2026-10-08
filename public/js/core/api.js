@@ -1,23 +1,20 @@
-import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, sep } from 'node:path';
-import { timingSafeEqual } from 'node:crypto';
 import { tx } from './db.js';
-import { hashPin, verifyPin, validPin, sha, newToken, createLoginLimiter } from './auth.js';
+import { hashPin, verifyPin, validPin, sha, newToken, safeEqual, createLoginLimiter } from './auth.js';
 import { HttpError, bad, conflict, forbidden, notFound, int, str, oneOf } from './util.js';
-import { playSeconds, timeCharge, checkTotals, durationHuman } from '../public/js/shared/billing.js';
+import { playSeconds, timeCharge, checkTotals, durationHuman } from './billing.js';
 
-const MIME = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.jpg': 'image/jpeg', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json',
-};
-const SESSION_TTL = 12 * 3600 * 1000;
-const MAX_BODY = 3 * 1024 * 1024;
+const SESSION_TTL = 16 * 3600 * 1000;
 const METHODS = ['cash', 'card', 'sbp'];
 const TABLE_KINDS = ['pool', 'pyramid', 'snooker', 'carom'];
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
-export function createApp({ db, lamps, publicDir, now = Date.now }) {
+/**
+ * Ядро приложения без привязки к транспорту: dispatch({method, path, query, body, headers, token})
+ * -> { status, data, setToken }. Работает и за HTTP-сервером (server/http.js), и прямо в браузере (local-backend.js).
+ */
+export function createCore({ db, lamps, now = Date.now }) {
   const limiter = createLoginLimiter();
-  const clients = new Set();
+  const listeners = new Set();
   const routes = [];
 
   const q = (sql, ...a) => db.prepare(sql).all(...a);
@@ -230,16 +227,16 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
   // ---------- публичные маршруты ----------
 
   route('GET', '/api/login-users', null, () =>
-    q("SELECT id,name,role FROM users WHERE active=1 ORDER BY role, id"));
+    q("SELECT id,name,role,must_change FROM users WHERE active=1 ORDER BY role, id"));
 
-  route('POST', '/api/login', null, (c) => {
+  route('POST', '/api/login', null, async (c) => {
     const id = int(c.body.user_id, 'пользователь');
     const u = q1('SELECT * FROM users WHERE id=? AND active=1', id);
     if (!u) throw bad('Пользователь не найден');
     const t = now();
     const wait = limiter.check(id, t);
     if (wait) throw new HttpError(429, `Слишком много попыток. Подождите ${wait} с.`);
-    if (typeof c.body.pin !== 'string' || !verifyPin(c.body.pin, u.pin_hash)) {
+    if (typeof c.body.pin !== 'string' || !(await verifyPin(c.body.pin, u.pin_hash))) {
       limiter.fail(id, t);
       audit(id, 'login.fail');
       throw new HttpError(401, 'Неверный PIN');
@@ -247,17 +244,17 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
     limiter.ok(id);
     const token = newToken();
     run('DELETE FROM auth_tokens WHERE expires_at<?', t);
-    run('INSERT INTO auth_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)', sha(token), u.id, t + SESSION_TTL);
+    run('INSERT INTO auth_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)', await sha(token), u.id, t + SESSION_TTL);
     audit(u.id, 'login');
-    c.setCookie = `sc_token=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL / 1000}`;
+    c.setToken = token;
     return { user: { id: u.id, name: u.name, role: u.role, must_change: !!u.must_change } };
   });
 
   // Контроллер ламп сообщает о состоянии света над столом: свет горит — идёт игра и начисляется время.
   route('POST', '/api/hw/lamp', null, (c) => {
-    const key = String(c.req.headers['x-device-key'] || '');
+    const key = String(c.headers['x-device-key'] || '');
     const real = settings().hw_key;
-    if (!real || key.length !== real.length || !timingSafeEqual(Buffer.from(key), Buffer.from(real))) throw new HttpError(401, 'Неверный ключ устройства');
+    if (!real || !safeEqual(new TextEncoder().encode(key), new TextEncoder().encode(real))) throw new HttpError(401, 'Неверный ключ устройства');
     const table = mustTable(int(c.body.table_id, 'стол'));
     const on = c.body.on === true;
     const result = tx(db, () => {
@@ -281,20 +278,20 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
 
   // ---------- вход/выход, профиль ----------
 
-  route('POST', '/api/logout', 'staff', (c) => {
-    run('DELETE FROM auth_tokens WHERE token_hash=?', sha(c.token));
-    c.setCookie = 'sc_token=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0';
+  route('POST', '/api/logout', 'staff', async (c) => {
+    run('DELETE FROM auth_tokens WHERE token_hash=?', await sha(c.token));
+    c.setToken = null;
     return { ok: true };
   });
 
   route('GET', '/api/me', 'staff', (c) => ({ user: publicUser(c.user) }));
 
-  route('POST', '/api/me/pin', 'any', (c) => {
+  route('POST', '/api/me/pin', 'any', async (c) => {
     const u = q1('SELECT * FROM users WHERE id=?', c.user.id);
-    if (!verifyPin(String(c.body.old_pin ?? ''), u.pin_hash)) throw new HttpError(401, 'Текущий PIN указан неверно');
+    if (!(await verifyPin(String(c.body.old_pin ?? ''), u.pin_hash))) throw new HttpError(401, 'Текущий PIN указан неверно');
     if (!validPin(c.body.new_pin)) throw bad('PIN — от 4 до 6 цифр');
     if (c.body.new_pin === c.body.old_pin) throw bad('Новый PIN должен отличаться от текущего');
-    run('UPDATE users SET pin_hash=?, must_change=0 WHERE id=?', hashPin(c.body.new_pin), u.id);
+    run('UPDATE users SET pin_hash=?, must_change=0 WHERE id=?', await hashPin(c.body.new_pin), u.id);
     audit(u.id, 'pin.change');
     return { ok: true };
   });
@@ -663,11 +660,11 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
   });
 
   route('GET', '/api/users', 'admin', () => q('SELECT id,name,role,active,must_change,created_at FROM users ORDER BY id'));
-  route('POST', '/api/users', 'admin', (c) => {
+  route('POST', '/api/users', 'admin', async (c) => {
     const name = str(c.body.name, 'имя', { min: 2, max: 40 });
     const role = oneOf(c.body.role, ['admin', 'worker'], 'роль');
     if (!validPin(c.body.pin)) throw bad('PIN — от 4 до 6 цифр');
-    const id = Number(run('INSERT INTO users(name,role,pin_hash,must_change,created_at) VALUES (?,?,?,1,?)', name, role, hashPin(c.body.pin), now()).lastInsertRowid);
+    const id = Number(run('INSERT INTO users(name,role,pin_hash,must_change,created_at) VALUES (?,?,?,1,?)', name, role, await hashPin(c.body.pin), now()).lastInsertRowid);
     audit(c.user.id, 'user.create', { id, name, role });
     return { id };
   });
@@ -689,11 +686,11 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
     });
     return { ok: true };
   });
-  route('POST', '/api/users/:id/pin', 'admin', (c) => {
+  route('POST', '/api/users/:id/pin', 'admin', async (c) => {
     if (!validPin(c.body.pin)) throw bad('PIN — от 4 до 6 цифр');
     const id = +c.params.id;
     if (!q1('SELECT id FROM users WHERE id=?', id)) throw notFound('Сотрудник не найден');
-    run('UPDATE users SET pin_hash=?, must_change=1 WHERE id=?', hashPin(c.body.pin), id);
+    run('UPDATE users SET pin_hash=?, must_change=1 WHERE id=?', await hashPin(c.body.pin), id);
     run('DELETE FROM auth_tokens WHERE user_id=?', id);
     audit(c.user.id, 'user.pin_reset', { id });
     return { ok: true };
@@ -707,6 +704,12 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
     if ('step_min' in b) out.step_min = String(int(b.step_min, 'шаг тарификации', { min: 1, max: 60 }));
     if ('min_minutes' in b) out.min_minutes = String(int(b.min_minutes, 'минимальное время', { min: 0, max: 240 }));
     if ('max_discount_pct' in b) out.max_discount_pct = String(int(b.max_discount_pct, 'скидка', { min: 0, max: 100 }));
+    for (const k of ['shift_start', 'shift_end']) {
+      if (k in b) {
+        if (!TIME_RE.test(b[k])) throw bad('Время смены указывайте в формате ЧЧ:ММ');
+        out[k] = b[k];
+      }
+    }
     if ('sbp_note' in b) out.sbp_note = str(b.sbp_note, 'подпись QR', { max: 200 });
     if ('sbp_qr' in b) {
       if (typeof b.sbp_qr !== 'string' || (b.sbp_qr && !/^data:image\/(png|jpeg|svg\+xml|webp);base64,/.test(b.sbp_qr)) || b.sbp_qr.length > 2_000_000) throw bad('QR должен быть картинкой (PNG/JPEG/SVG) до 1,5 МБ');
@@ -734,111 +737,55 @@ export function createApp({ db, lamps, publicDir, now = Date.now }) {
   route('GET', '/api/audit', 'admin', () =>
     q('SELECT a.*, u.name user_name FROM audit a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 300'));
 
-  route('GET', '/api/events', 'staff', (c) => {
-    c.res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    c.res.write('retry: 3000\n\n');
-    clients.add(c.res);
-    c.req.on('close', () => clients.delete(c.res));
-    c.streamed = true;
-  });
+  // ---------- диспетчер ----------
 
-  // ---------- HTTP ----------
+  const emit = () => listeners.forEach((fn) => fn());
 
-  function broadcast() {
-    for (const res of clients) res.write(`data: ${now()}\n\n`);
-  }
-  const keepAlive = setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 25_000);
-  keepAlive.unref();
-
-  function parseCookies(h = '') {
-    const o = {};
-    for (const part of h.split(';')) {
-      const i = part.indexOf('=');
-      if (i > 0) o[part.slice(0, i).trim()] = part.slice(i + 1).trim();
-    }
-    return o;
+  /** Пользователь по токену сессии (или null). */
+  async function authenticate(token) {
+    if (!token) return null;
+    const row = q1('SELECT u.*, a.expires_at FROM auth_tokens a JOIN users u ON u.id=a.user_id WHERE a.token_hash=? AND u.active=1', await sha(token));
+    return row && row.expires_at >= now() ? row : null;
   }
 
-  function readBody(req) {
-    return new Promise((resolve, reject) => {
-      let size = 0;
-      const chunks = [];
-      req.on('data', (ch) => {
-        size += ch.length;
-        if (size > MAX_BODY) { reject(new HttpError(413, 'Слишком большой запрос')); req.destroy(); return; }
-        chunks.push(ch);
-      });
-      req.on('end', () => {
-        if (!chunks.length) return resolve({});
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(bad('Некорректный JSON')); }
-      });
-      req.on('error', reject);
-    });
-  }
-
-  function send(res, status, body, headers = {}) {
-    const data = JSON.stringify(body ?? null);
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
-    res.end(data);
-  }
-
-  async function serveStatic(req, res, pathname) {
-    const rel = normalize(decodeURIComponent(pathname === '/' ? '/index.html' : pathname)).replace(/^([/\\])+/, '');
-    const file = join(publicDir, rel);
-    if (file !== publicDir && !file.startsWith(publicDir + sep)) return send(res, 403, { error: 'Нет доступа' });
+  async function dispatch({ method, path, query = {}, body = {}, headers = {}, token = null }) {
     try {
-      const st = await stat(file);
-      if (!st.isFile()) throw new Error('not file');
-      const buf = await readFile(file);
-      res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-      res.end(req.method === 'HEAD' ? undefined : buf);
-    } catch {
-      send(res, 404, { error: 'Не найдено' });
-    }
-  }
-
-  async function handle(req, res) {
-    const url = new URL(req.url, 'http://localhost');
-    try {
-      if (!url.pathname.startsWith('/api/')) {
-        if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Метод не поддерживается' });
-        return await serveStatic(req, res, url.pathname);
-      }
-      const method = req.method;
       let matched = null;
       let params = {};
       for (const r of routes) {
         if (r.method !== method) continue;
-        const m = r.re.exec(url.pathname);
+        const m = r.re.exec(path);
         if (m) { matched = r; params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])])); break; }
       }
-      if (!matched) return send(res, 404, { error: 'Не найдено' });
+      if (!matched) return { status: 404, data: { error: 'Не найдено' } };
 
-      const c = { req, res, params, query: Object.fromEntries(url.searchParams), body: {}, user: null, token: null, setCookie: null };
+      const c = { params, query, body, headers, user: null, token, setToken: undefined };
       if (matched.role) {
-        const token = parseCookies(req.headers.cookie).sc_token;
-        const row = token && q1('SELECT u.*, a.expires_at FROM auth_tokens a JOIN users u ON u.id=a.user_id WHERE a.token_hash=? AND u.active=1', sha(token));
-        if (!row || row.expires_at < now()) return send(res, 401, { error: 'Требуется вход' });
-        c.user = row;
-        c.token = token;
-        if (matched.role === 'admin' && row.role !== 'admin') return send(res, 403, { error: 'Только для администратора' });
-        if (row.must_change && matched.role !== 'any' && url.pathname !== '/api/logout' && url.pathname !== '/api/me') {
-          return send(res, 403, { error: 'Сначала смените PIN', code: 'must_change_pin' });
+        const user = await authenticate(token);
+        if (!user) return { status: 401, data: { error: 'Требуется вход' } };
+        c.user = user;
+        if (matched.role === 'admin' && user.role !== 'admin') return { status: 403, data: { error: 'Только для администратора' } };
+        if (user.must_change && matched.role !== 'any' && path !== '/api/logout' && path !== '/api/me') {
+          return { status: 403, data: { error: 'Сначала смените PIN', code: 'must_change_pin' } };
         }
       }
-      if (method === 'POST' || method === 'PATCH' || method === 'PUT') c.body = await readBody(req);
-      if (c.body === null || typeof c.body !== 'object' || Array.isArray(c.body)) throw bad('Некорректный запрос');
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) throw bad('Некорректный запрос');
 
-      const result = await matched.fn(c);
-      if (c.streamed) return;
-      send(res, 200, result, c.setCookie ? { 'Set-Cookie': c.setCookie } : {});
-      if (method !== 'GET') broadcast();
+      const data = await matched.fn(c);
+      if (method !== 'GET') emit();
+      return { status: 200, data, setToken: c.setToken };
     } catch (e) {
-      if (e instanceof HttpError) return send(res, e.status, { error: e.message, code: e.code });
-      console.error(`${req.method} ${req.url}`, e);
-      send(res, 500, { error: 'Внутренняя ошибка сервера' });
+      if (e instanceof HttpError) return { status: e.status, data: { error: e.message, code: e.code } };
+      console.error(`${method} ${path}`, e);
+      return { status: 500, data: { error: 'Внутренняя ошибка' } };
     }
   }
 
-  return { handle, broadcast, close() { clearInterval(keepAlive); for (const r of clients) r.end(); } };
+  return {
+    dispatch,
+    authenticate,
+    /** Подписка на любые изменения данных (для обновления интерфейса). */
+    onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
+    emit,
+  };
 }

@@ -1,7 +1,7 @@
 import { h, icon, openModal, closeAllModals, formDialog, toast } from '../ui.js';
 import { post, patch } from '../api.js';
 import { store, act, loadState, tableCheck, liveSessionOf, liveTotals, isAdmin } from '../store.js';
-import { money, duration } from '../shared/billing.js';
+import { money, duration } from '../core/billing.js';
 import { openPayDialog } from './pay.js';
 
 const KINDS = { pool: 'Пул', pyramid: 'Пирамида', snooker: 'Снукер', carom: 'Карамболь' };

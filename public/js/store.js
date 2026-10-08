@@ -1,6 +1,6 @@
 import { get } from './api.js';
 import { toast } from './ui.js';
-import { playSeconds, checkTotals } from './shared/billing.js';
+import { playSeconds, checkTotals } from './core/billing.js';
 
 export const store = {
   state: null,

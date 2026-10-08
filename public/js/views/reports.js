@@ -1,6 +1,6 @@
 import { h, fmtDay } from '../ui.js';
 import { get } from '../api.js';
-import { money, durationHuman } from '../shared/billing.js';
+import { money, durationHuman } from '../core/billing.js';
 
 let preset = '7d';
 let custom = { from: '', to: '' };

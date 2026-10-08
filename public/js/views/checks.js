@@ -1,7 +1,7 @@
 import { h, openModal, formDialog, fmtDateTime, closeAllModals, toast } from '../ui.js';
 import { get, post } from '../api.js';
 import { store, loadState, isAdmin, liveTotals } from '../store.js';
-import { money, durationHuman } from '../shared/billing.js';
+import { money, durationHuman } from '../core/billing.js';
 import { openTableModal, openCheckPayment } from './tables.js';
 
 const METHOD = { cash: 'Наличные', card: 'Карта', sbp: 'QR / СБП' };

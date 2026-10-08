@@ -1,8 +1,9 @@
 import { h, icon, toast, refreshModals, closeAllModals, fmtTime } from './ui.js';
-import { get, post, setUnauthorizedHandler } from './api.js';
+import { get, post, setUnauthorizedHandler, initBackend, getMode, subscribeChanges, startChangeFeed, stopChangeFeed } from './api.js';
 import { store, loadState, now, liveTotals, liveSeconds } from './store.js';
-import { money, duration } from './shared/billing.js';
+import { money, duration } from './core/billing.js';
 import { renderLogin } from './views/login.js';
+import { lastBackupAt } from './backup.js';
 import { tablesView } from './views/tables.js';
 import { barView } from './views/bar.js';
 import { checksView } from './views/checks.js';
@@ -24,7 +25,6 @@ const ROUTES = {
 };
 
 let shell = null;
-let events = null;
 let currentRoute = null;
 let renderToken = 0;
 let frame = 0;
@@ -40,13 +40,15 @@ function currentKey() {
 function buildShell() {
   const topbar = h('div', { class: 'topbar' });
   const nav = h('nav', { class: 'nav' });
+  const alert = h('div', { class: 'alerts' });
   const view = h('main');
-  shell = { topbar, nav, view };
-  app.replaceChildren(h('div', { class: 'shell' }, topbar, nav, view));
+  shell = { topbar, nav, alert, view };
+  app.replaceChildren(h('div', { class: 'shell' }, topbar, nav, alert, view));
 }
 
 function renderChrome() {
   const { state } = store;
+  renderAlerts();
   document.title = `${state.settings.club_name} · Бильярд`;
   const s = state.shift;
   shell.topbar.replaceChildren(
@@ -59,6 +61,34 @@ function renderChrome() {
   const key = currentKey();
   shell.nav.replaceChildren(...Object.entries(ROUTES).filter(([, r]) => !r.admin || state.user.role === 'admin')
     .map(([k, r]) => h('a', { href: `#/${k}`, class: k === key ? 'on' : '' }, icon(r.icon), r.label)));
+}
+
+const toMin = (t) => { const [hh, mm] = String(t).split(':').map(Number); return hh * 60 + mm; };
+
+/** Предупреждения: смена затянулась сверх плана, давно не было резервной копии. */
+function renderAlerts() {
+  const { state } = store;
+  const items = [];
+  const sh = state.shift;
+  if (sh) {
+    const d = new Date(sh.opened_at);
+    d.setHours(0, 0, 0, 0);
+    const start = toMin(state.settings.shift_start);
+    let end = toMin(state.settings.shift_end);
+    if (end <= start) end += 1440;
+    if (now() > d.getTime() + (end + 15) * 60000) {
+      items.push(h('div', { class: 'banner' }, `Плановое время смены закончилось в ${state.settings.shift_end}. Закройте смену и пересчитайте кассу.`,
+        h('a', { class: 'btn sm primary', href: '#/shift' }, 'Закрыть смену')));
+    }
+  }
+  if (getMode() === 'local' && state.user.role === 'admin') {
+    const days = (Date.now() - lastBackupAt()) / 86400000;
+    if (lastBackupAt() === 0 || days > 7) {
+      items.push(h('div', { class: 'banner' }, lastBackupAt() ? `Резервная копия не делалась ${Math.floor(days)} дн.` : 'Резервная копия ещё не делалась. Данные хранятся только на этом устройстве.',
+        h('a', { class: 'btn sm primary', href: '#/admin' }, 'Сделать копию')));
+    }
+  }
+  shell.alert.replaceChildren(...items);
 }
 
 async function renderView(keepScroll) {
@@ -118,28 +148,23 @@ setInterval(updateLive, 1000);
 
 // ---------- вход / выход ----------
 
-function connectEvents() {
-  events?.close();
-  events = new EventSource('/api/events');
-  let timer = 0;
-  events.onmessage = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => loadState().catch(() => {}), 80);
-  };
-}
+let changeTimer = 0;
+subscribeChanges(() => {
+  clearTimeout(changeTimer);
+  changeTimer = setTimeout(() => { if (shell) loadState().catch(() => {}); }, 80);
+});
 
 async function start() {
   await loadState();
   closeAllModals();
   buildShell();
-  connectEvents();
+  startChangeFeed();
   renderChrome();
   renderView(false);
 }
 
 async function showLogin() {
-  events?.close();
-  events = null;
+  stopChangeFeed();
   shell = null;
   store.state = null;
   closeAllModals();
@@ -153,11 +178,18 @@ async function logout() {
 
 setUnauthorizedHandler(() => { if (shell) { toast('Сессия завершена, войдите снова', 'warn'); showLogin(); } });
 window.addEventListener('hashchange', onRoute);
+window.addEventListener('sunclub-backup', () => { if (shell) renderAlerts(); });
 // Подстраховка на случай потери SSE-соединения.
-setInterval(() => { if (shell && !document.hidden) loadState().catch(() => {}); }, 20000);
+setInterval(() => { if (shell && !document.hidden && getMode() === 'server') loadState().catch(() => {}); }, 20000);
 document.addEventListener('visibilitychange', () => { if (shell && !document.hidden) loadState().catch(() => {}); });
 
 (async () => {
+  try {
+    await initBackend();
+  } catch (e) {
+    app.replaceChildren(h('div', { class: 'login' }, h('div', { class: 'login-box' }, h('div', { class: 'brand' }, h('span', { class: 'dot' }), 'SunClub'), h('p', null, e.message))));
+    return;
+  }
   try {
     const { user } = await get('/api/me');
     if (user.must_change) { await post('/api/logout'); return showLogin(); }
@@ -166,3 +198,8 @@ document.addEventListener('visibilitychange', () => { if (shell && !document.hid
     showLogin();
   }
 })();
+
+// Установка как приложение и работа без интернета.
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}

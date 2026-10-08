@@ -1,11 +1,13 @@
 import { h, icon, formDialog, openModal, confirmDialog, fmtDateTime, rubInput, toast, readFileAsDataUrl } from '../ui.js';
 import { get, post, patch, put } from '../api.js';
 import { store, loadState } from '../store.js';
-import { money } from '../shared/billing.js';
+import { getMode, getLocal } from '../api.js';
+import { downloadBackup, lastBackupAt } from '../backup.js';
+import { money } from '../core/billing.js';
 import { kindLabel } from './tables.js';
 
 let tab = 'tables';
-const TABS = [['tables', 'Столы'], ['staff', 'Сотрудники'], ['params', 'Параметры'], ['hw', 'Лампы и оборудование'], ['audit', 'Журнал']];
+const TABS = [['tables', 'Столы'], ['staff', 'Сотрудники'], ['params', 'Параметры'], ['backup', 'Резервные копии'], ['hw', 'Лампы и оборудование'], ['audit', 'Журнал']];
 const KIND_OPTS = [['pool', 'Пул'], ['pyramid', 'Пирамида'], ['snooker', 'Снукер'], ['carom', 'Карамболь']].map(([v, l]) => ({ v, l }));
 
 function tableForm(t, ctx) {
@@ -94,6 +96,8 @@ async function paramsTab(ctx) {
   const step = h('input', { type: 'number', min: 1, max: 60, value: s.step_min });
   const min = h('input', { type: 'number', min: 0, max: 240, value: s.min_minutes });
   const disc = h('input', { type: 'number', min: 0, max: 100, value: s.max_discount_pct });
+  const shiftStart = h('input', { type: 'time', value: s.shift_start });
+  const shiftEnd = h('input', { type: 'time', value: s.shift_end });
   const note = h('input', { type: 'text', value: s.sbp_note, placeholder: 'Например: СБП по номеру +7 900 000-00-00, SunClub' });
   const preview = h('div');
   const drawQr = () => preview.replaceChildren(qr ? h('div', { class: 'row' }, h('img', { src: qr, alt: 'QR', style: { width: '120px', background: '#fff', borderRadius: '10px', padding: '6px' } }), h('button', { class: 'btn sm danger', onclick: () => { qr = ''; drawQr(); } }, 'Убрать')) : h('span', { class: 'muted' }, 'QR не загружен'));
@@ -107,6 +111,7 @@ async function paramsTab(ctx) {
   } });
   return h('div', { class: 'card stack', style: { maxWidth: '640px' } },
     f('Название клуба', name),
+    h('div', { class: 'grid-2', style: { gap: '12px' } }, f('Начало смены', shiftStart), f('Конец смены', shiftEnd)),
     f('Шаг тарификации, минут', step, 'Время округляется вверх до шага: при шаге 1 — поминутно, при 15 — по четверти часа.'),
     f('Минимальное время к оплате, минут', min, '0 — без минимума. Применяется к каждой игре (и к каждому столу при переносе).'),
     f('Максимальная скидка для сотрудника, %', disc, 'Администратор может дать любую скидку.'),
@@ -114,14 +119,43 @@ async function paramsTab(ctx) {
     f('Подпись под QR', note),
     h('div', null, h('button', { class: 'btn primary', onclick: async () => {
       try {
-        await put('/api/settings', { club_name: name.value, step_min: +step.value, min_minutes: +min.value, max_discount_pct: +disc.value, sbp_note: note.value, sbp_qr: qr });
+        await put('/api/settings', { club_name: name.value, step_min: +step.value, min_minutes: +min.value, max_discount_pct: +disc.value, sbp_note: note.value, sbp_qr: qr, shift_start: shiftStart.value, shift_end: shiftEnd.value });
         toast('Настройки сохранены');
         await loadState();
       } catch (e) { toast(e.message, 'err'); }
     } }, 'Сохранить')));
 }
 
+async function backupTab() {
+  if (getMode() !== 'local') {
+    return h('div', { class: 'card stack', style: { maxWidth: '640px' } }, h('h3', null, 'Резервные копии'),
+      h('p', { style: { margin: 0 } }, 'Программа работает с сервером: база лежит в файле data/club.db на компьютере сервера. Копируйте этот файл по расписанию.'));
+  }
+  const last = lastBackupAt();
+  const file = h('input', { type: 'file', accept: '.sqlite,.db,application/octet-stream' });
+  return h('div', { class: 'stack', style: { maxWidth: '640px' } },
+    h('div', { class: 'card stack' }, h('h3', null, 'Где хранятся данные'),
+      h('p', { style: { margin: 0 } }, 'Все данные клуба лежат в памяти браузера на этом устройстве. Поэтому всё работает мгновенно и без интернета, но при очистке данных браузера, смене устройства или поломке они пропадут. Делайте копии: при закрытии смены файл копии скачивается автоматически.'),
+      h('div', { class: 'muted' }, last ? `Последняя копия: ${new Date(last).toLocaleString('ru-RU')}` : 'Копии ещё не делались'),
+      h('div', null, h('button', { class: 'btn primary', onclick: () => { downloadBackup(); } }, 'Скачать копию сейчас'))),
+    h('div', { class: 'card stack' }, h('h3', null, 'Восстановить из копии'),
+      h('p', { class: 'muted', style: { margin: 0 } }, 'Текущие данные на этом устройстве будут заменены данными из файла. Подходит для переноса на другое устройство.'),
+      file,
+      h('div', null, h('button', { class: 'btn danger', onclick: async () => {
+        const fl = file.files[0];
+        if (!fl) return toast('Выберите файл копии', 'warn');
+        if (!(await confirmDialog('Все текущие данные будут заменены данными из файла. Продолжить?', { danger: true, okText: 'Заменить данные' }))) return;
+        try { await getLocal().importBackup(new Uint8Array(await fl.arrayBuffer())); } catch (e) { toast(e.message, 'err'); }
+      } }, 'Восстановить'))));
+}
+
 async function hwTab(ctx) {
+  if (getMode() === 'local') {
+    return h('div', { class: 'card stack', style: { maxWidth: '760px' } },
+      h('h3', null, 'Лампы над столами'),
+      h('p', { style: { margin: 0 } }, 'Сейчас программа работает на этом устройстве без сервера, поэтому лампы пока не подключены: старт и остановка игры ведутся кнопками. Учёт времени, оплаты и смены от ламп не зависят.'),
+      h('p', { class: 'muted', style: { margin: 0 } }, 'Когда будут установлены реле, подключим их отдельным шагом: либо небольшим клубным шлюзом (мини-ПК или контроллер в сети клуба), либо серверным режимом программы. Для каждого стола в «Столах» уже можно заранее записать адреса включения и выключения реле.'));
+  }
   const s = await get('/api/settings');
   const url = `${location.origin}/api/hw/lamp`;
   return h('div', { class: 'stack', style: { maxWidth: '760px' } },
@@ -154,7 +188,7 @@ async function auditTab() {
 export const adminView = {
   live: false,
   async render(state, ctx) {
-    const content = await ({ tables: tablesTab, staff: staffTab, params: paramsTab, hw: hwTab, audit: auditTab }[tab])(ctx);
+    const content = await ({ tables: tablesTab, staff: staffTab, params: paramsTab, backup: backupTab, hw: hwTab, audit: auditTab }[tab])(ctx);
     return h('div', { class: 'stack' },
       h('div', { class: 'page-head' }, h('h1', null, 'Настройки'),
         h('div', { class: 'seg' }, TABS.map(([k, l]) => h('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; ctx.rerender(); } }, l)))),
