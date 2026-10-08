@@ -3,6 +3,7 @@
 const CACHE = 'sunclub-v1';
 const PRECACHE = [
   './',
+  './apps-script/Code.gs',
   './css/app.css',
   './img/bg.jpg',
   './img/icon-192.png',
@@ -17,6 +18,7 @@ const PRECACHE = [
   './js/core/db.js',
   './js/core/lamps.js',
   './js/core/sqljs-db.js',
+  './js/core/sync.js',
   './js/core/util.js',
   './js/local-backend.js',
   './js/main.js',
@@ -25,6 +27,7 @@ const PRECACHE = [
   './js/views/admin.js',
   './js/views/bar.js',
   './js/views/checks.js',
+  './js/views/cloud.js',
   './js/views/login.js',
   './js/views/menu.js',
   './js/views/pay.js',

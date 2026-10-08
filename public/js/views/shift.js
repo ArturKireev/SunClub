@@ -2,6 +2,7 @@ import { h, icon, formDialog, openModal, confirmDialog, fmtDateTime, fmtTime, ru
 import { get, post } from '../api.js';
 import { store, act, loadState, isAdmin, now } from '../store.js';
 import { downloadBackup } from '../backup.js';
+import { getLocal } from '../api.js';
 import { money, durationHuman } from '../core/billing.js';
 
 const METHOD = { cash: 'Наличные', card: 'Карта', sbp: 'QR / СБП' };
@@ -57,6 +58,7 @@ async function closeShift() {
   if (ok) {
     await loadState();
     downloadBackup();
+    getLocal()?.sync.flush().catch(() => {});
     openModal({ title: 'Смена закрыта', size: 'wide', render: () => shiftDetails(summary) });
   }
 }

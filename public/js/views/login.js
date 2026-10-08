@@ -1,5 +1,6 @@
 import { h, icon, toast } from '../ui.js';
-import { get, post } from '../api.js';
+import { get, post, getMode, getLocal } from '../api.js';
+import { connectDialog } from './cloud.js';
 
 /** Экран входа: выбор сотрудника → PIN. onDone(user) вызывается после входа и (если нужно) смены PIN. */
 export async function renderLogin(root, onDone) {
@@ -20,6 +21,9 @@ export async function renderLogin(root, onDone) {
         h('span', { class: 'grow' }, u.name),
         u.must_change ? h('span', { class: 'chip warn' }, 'первый вход') : null,
         h('span', { class: 'muted', style: { fontSize: '13px' } }, u.role === 'admin' ? 'админ' : 'сотрудник'))),
+      getMode() === 'local' && getLocal().sync && !getLocal().sync.configured
+        ? h('button', { class: 'btn ghost block', style: { marginTop: '14px' }, onclick: async () => { if (await connectDialog()) { users = await get('/api/login-users'); showUsers(); } } }, '☁ Подключить облако (данные клуба с другого устройства)')
+        : null,
       users.some((u) => u.must_change) ? h('p', { class: 'muted', style: { fontSize: '13px', margin: '8px 0 0' } }, 'Начальные PIN: администраторы — 1111 и 2222, сотрудники — 1001, 1002, 1003. При первом входе задайте свой.') : null));
   }
 

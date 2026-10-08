@@ -5,9 +5,10 @@ import { getMode, getLocal } from '../api.js';
 import { downloadBackup, lastBackupAt } from '../backup.js';
 import { money } from '../core/billing.js';
 import { kindLabel } from './tables.js';
+import { cloudTab } from './cloud.js';
 
 let tab = 'tables';
-const TABS = [['tables', 'Столы'], ['staff', 'Сотрудники'], ['params', 'Параметры'], ['backup', 'Резервные копии'], ['hw', 'Лампы и оборудование'], ['audit', 'Журнал']];
+const TABS = [['tables', 'Столы'], ['staff', 'Сотрудники'], ['params', 'Параметры'], ['cloud', 'Облако'], ['backup', 'Резервные копии'], ['hw', 'Лампы и оборудование'], ['audit', 'Журнал']];
 const KIND_OPTS = [['pool', 'Пул'], ['pyramid', 'Пирамида'], ['snooker', 'Снукер'], ['carom', 'Карамболь']].map(([v, l]) => ({ v, l }));
 
 function tableForm(t, ctx) {
@@ -188,7 +189,7 @@ async function auditTab() {
 export const adminView = {
   live: false,
   async render(state, ctx) {
-    const content = await ({ tables: tablesTab, staff: staffTab, params: paramsTab, backup: backupTab, hw: hwTab, audit: auditTab }[tab])(ctx);
+    const content = await ({ tables: tablesTab, staff: staffTab, params: paramsTab, cloud: cloudTab, backup: backupTab, hw: hwTab, audit: auditTab }[tab])(ctx);
     return h('div', { class: 'stack' },
       h('div', { class: 'page-head' }, h('h1', null, 'Настройки'),
         h('div', { class: 'seg' }, TABS.map(([k, l]) => h('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; ctx.rerender(); } }, l)))),

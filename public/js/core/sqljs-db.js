@@ -1,9 +1,12 @@
 // Адаптер sql.js под интерфейс node:sqlite (exec / prepare().run/get/all), чтобы ядро работало в браузере.
 const norm = (args) => args.map((v) => (v === undefined ? null : typeof v === 'boolean' ? Number(v) : v));
 
-export function wrapSqlJs(sql) {
+export function wrapSqlJs(initial) {
+  let sql = initial;
   return {
-    raw: sql,
+    get raw() { return sql; },
+    /** Подменяет базу целиком (загрузка свежей версии из облака) без пересоздания ядра. */
+    swap(next) { sql = next; },
     exec(text) { sql.exec(text); },
     prepare(text) {
       return {

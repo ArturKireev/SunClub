@@ -3,7 +3,8 @@ import { get, post, setUnauthorizedHandler, initBackend, getMode, subscribeChang
 import { store, loadState, now, liveTotals, liveSeconds } from './store.js';
 import { money, duration } from './core/billing.js';
 import { renderLogin } from './views/login.js';
-import { lastBackupAt } from './backup.js';
+import { getLocal } from './api.js';
+import { STATUS_TEXT, STATUS_KIND, conflictBanner, statusModal } from './views/cloud.js';
 import { tablesView } from './views/tables.js';
 import { barView } from './views/bar.js';
 import { checksView } from './views/checks.js';
@@ -54,6 +55,7 @@ function renderChrome() {
   shell.topbar.replaceChildren(
     h('div', { class: 'brand' }, h('span', { class: 'dot' }), state.settings.club_name),
     h('div', { class: 'right row' },
+      syncChip(),
       s ? h('a', { class: 'chip ok btnlike', href: '#/shift', style: { textDecoration: 'none' } }, 'Смена', h('span', { class: 'hide-sm' }, ` · ${s.user_name}`), ` · с ${fmtTime(s.opened_at)}`)
         : h('a', { class: 'chip warn btnlike', href: '#/shift', style: { textDecoration: 'none' } }, 'Смена закрыта'),
       h('span', { class: 'chip hide-sm' }, h('span', null, state.user.name), state.user.role === 'admin' ? ' · админ' : ''),
@@ -63,9 +65,17 @@ function renderChrome() {
     .map(([k, r]) => h('a', { href: `#/${k}`, class: k === key ? 'on' : '' }, icon(r.icon), r.label)));
 }
 
+function syncChip() {
+  const sync = getLocal()?.sync;
+  if (!sync || !sync.configured) return null;
+  const st = sync.status;
+  const short = { synced: 'Облако', pending: 'Отправка…', offline: 'Нет связи', conflict: 'Конфликт', error: 'Ошибка облака', off: 'Облако' }[st];
+  return h('button', { class: `chip btnlike ${STATUS_KIND[st]}`, title: STATUS_TEXT[st], onclick: statusModal, style: { cursor: 'pointer' } }, '☁ ', short);
+}
+
 const toMin = (t) => { const [hh, mm] = String(t).split(':').map(Number); return hh * 60 + mm; };
 
-/** Предупреждения: смена затянулась сверх плана, давно не было резервной копии. */
+/** Предупреждения: смена затянулась сверх плана, облако не подключено или в конфликте. */
 function renderAlerts() {
   const { state } = store;
   const items = [];
@@ -81,12 +91,11 @@ function renderAlerts() {
         h('a', { class: 'btn sm primary', href: '#/shift' }, 'Закрыть смену')));
     }
   }
-  if (getMode() === 'local' && state.user.role === 'admin') {
-    const days = (Date.now() - lastBackupAt()) / 86400000;
-    if (lastBackupAt() === 0 || days > 7) {
-      items.push(h('div', { class: 'banner' }, lastBackupAt() ? `Резервная копия не делалась ${Math.floor(days)} дн.` : 'Резервная копия ещё не делалась. Данные хранятся только на этом устройстве.',
-        h('a', { class: 'btn sm primary', href: '#/admin' }, 'Сделать копию')));
-    }
+  const sync = getLocal()?.sync;
+  if (sync?.status === 'conflict') items.push(conflictBanner());
+  if (sync && !sync.configured && state.user.role === 'admin') {
+    items.push(h('div', { class: 'banner' }, 'Облако не подключено: данные клуба лежат только на этом устройстве и недоступны с других.',
+      h('a', { class: 'btn sm primary', href: '#/admin' }, 'Подключить облако')));
   }
   shell.alert.replaceChildren(...items);
 }
@@ -155,6 +164,7 @@ subscribeChanges(() => {
 });
 
 async function start() {
+  getLocal()?.onSyncStatus(() => { if (shell) { renderChrome(); } });
   await loadState();
   closeAllModals();
   buildShell();

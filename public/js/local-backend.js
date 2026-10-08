@@ -4,11 +4,29 @@ import { createCore } from './core/api.js';
 import { initDb, seedIfEmpty } from './core/db.js';
 import { createLamps } from './core/lamps.js';
 import { wrapSqlJs } from './core/sqljs-db.js';
+import { createSync } from './core/sync.js';
 
 const IDB_NAME = 'sunclub';
 const STORE = 'kv';
 const KEY = 'db';
 const TOKEN_KEY = 'sc_token';
+const SESS_KEY = 'sunclub_sessions';
+
+/** Сессии лежат в localStorage устройства, а не в базе: база синхронизируется между устройствами, входы — нет. */
+function localSessions() {
+  const load = () => { try { return JSON.parse(localStorage.getItem(SESS_KEY)) || {}; } catch { return {}; } };
+  const save = (m) => localStorage.setItem(SESS_KEY, JSON.stringify(m));
+  return {
+    add(hash, userId, exp) { const m = load(); m[hash] = { user_id: userId, expires_at: exp }; save(m); },
+    find: (hash) => load()[hash],
+    remove(hash) { const m = load(); delete m[hash]; save(m); },
+    removeUser(id) { const m = load(); for (const k of Object.keys(m)) if (m[k].user_id === id) delete m[k]; save(m); },
+    purge(t) { const m = load(); for (const k of Object.keys(m)) if (m[k].expires_at < t) delete m[k]; save(m); },
+  };
+}
+
+const REQUIRED_TABLES = ['users', 'checks', 'shifts', 'payments'];
+const NO_SYNC = new Set(['/api/login', '/api/logout']); // вход и выход не должны порождать записи в облако
 
 function idb() {
   return new Promise((resolve, reject) => {
@@ -63,13 +81,13 @@ export async function startLocalBackend() {
   if (!(await acquireLock())) throw Object.assign(new Error('Программа уже открыта в другой вкладке или окне. Закройте её там и обновите страницу.'), { code: 'locked' });
   await loadScript('vendor/sql-wasm.js');
   const SQL = await globalThis.initSqlJs({ locateFile: (f) => `vendor/${f}` });
-  const sql = new SQL.Database((await idbGet()) || undefined);
+  let sql = new SQL.Database((await idbGet()) || undefined);
   const db = wrapSqlJs(sql);
   const fk = () => sql.run('PRAGMA foreign_keys = ON;');
   fk();
   initDb(db);
   await seedIfEmpty(db);
-  const core = createCore({ db, lamps: createLamps(db) });
+  const core = createCore({ db, lamps: createLamps(db), sessions: localSessions() });
   navigator.storage?.persist?.().catch(() => {});
 
   // Сохраняем базу после каждого изменения (файл маленький, выгрузка занимает миллисекунды).
@@ -86,7 +104,33 @@ export async function startLocalBackend() {
   };
   await persist();
 
+  const hasTables = (database) => database.exec(`SELECT name FROM sqlite_master WHERE name IN (${REQUIRED_TABLES.map((t) => `'${t}'`).join(',')})`)[0]?.values.length === REQUIRED_TABLES.length;
+
+  // Облачная синхронизация: свежую версию из облака подставляем «на лету», не пересоздавая ядро.
+  const syncListeners = new Set();
+  const sync = createSync({
+    storage: localStorage,
+    getBytes: async () => snapshot(),
+    applyBytes: async (bytes) => {
+      const next = new SQL.Database(bytes);
+      if (!hasTables(next)) { next.close(); throw new Error('Облачная копия повреждена'); }
+      const old = sql;
+      sql = next;
+      db.swap(next);
+      old.close();
+      fk();
+      initDb(db);
+      await saving;
+      await idbPut(snapshot());
+      core.emit();
+    },
+    onStatus: (s, i) => syncListeners.forEach((fn) => fn(s, i)),
+  });
+  sync.start();
+
   return {
+    sync,
+    onSyncStatus: (fn) => { syncListeners.add(fn); },
     async request(method, path, body) {
       const url = new URL(path, 'http://local');
       const r = await core.dispatch({
@@ -95,7 +139,10 @@ export async function startLocalBackend() {
       });
       if (typeof r.setToken === 'string') sessionStorage.setItem(TOKEN_KEY, r.setToken);
       else if (r.setToken === null) sessionStorage.removeItem(TOKEN_KEY);
-      if (method !== 'GET') await persist();
+      if (method !== 'GET') {
+        await persist();
+        if (!NO_SYNC.has(url.pathname) && r.status < 400) sync.markDirty();
+      }
       return r;
     },
     onChange: (fn) => core.onChange(fn),
@@ -106,12 +153,13 @@ export async function startLocalBackend() {
       let ok = false;
       try {
         const probe = new SQL.Database(bytes);
-        ok = probe.exec("SELECT name FROM sqlite_master WHERE name IN ('users','checks','shifts','payments')")[0]?.values.length === 4;
+        ok = hasTables(probe);
         probe.close();
       } catch { ok = false; }
       if (!ok) throw new Error('Это не файл резервной копии SunClub');
       await saving;
       await idbPut(bytes);
+      sync.markDirty(); // восстановленные данные должны уйти в облако
       sessionStorage.removeItem(TOKEN_KEY);
       location.reload();
     },

@@ -12,7 +12,18 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * Ядро приложения без привязки к транспорту: dispatch({method, path, query, body, headers, token})
  * -> { status, data, setToken }. Работает и за HTTP-сервером (server/http.js), и прямо в браузере (local-backend.js).
  */
-export function createCore({ db, lamps, now = Date.now }) {
+/** Хранилище сессий в самой базе (серверный режим). В браузере сессии хранятся отдельно, чтобы не синхронизироваться между устройствами. */
+export function dbSessions(db) {
+  return {
+    add: (hash, userId, expiresAt) => db.prepare('INSERT INTO auth_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)').run(hash, userId, expiresAt),
+    find: (hash) => db.prepare('SELECT user_id, expires_at FROM auth_tokens WHERE token_hash=?').get(hash),
+    remove: (hash) => db.prepare('DELETE FROM auth_tokens WHERE token_hash=?').run(hash),
+    removeUser: (userId) => db.prepare('DELETE FROM auth_tokens WHERE user_id=?').run(userId),
+    purge: (t) => db.prepare('DELETE FROM auth_tokens WHERE expires_at<?').run(t),
+  };
+}
+
+export function createCore({ db, lamps, now = Date.now, sessions = dbSessions(db) }) {
   const limiter = createLoginLimiter();
   const listeners = new Set();
   const routes = [];
@@ -243,8 +254,8 @@ export function createCore({ db, lamps, now = Date.now }) {
     }
     limiter.ok(id);
     const token = newToken();
-    run('DELETE FROM auth_tokens WHERE expires_at<?', t);
-    run('INSERT INTO auth_tokens(token_hash,user_id,expires_at) VALUES (?,?,?)', await sha(token), u.id, t + SESSION_TTL);
+    sessions.purge(t);
+    sessions.add(await sha(token), u.id, t + SESSION_TTL);
     audit(u.id, 'login');
     c.setToken = token;
     return { user: { id: u.id, name: u.name, role: u.role, must_change: !!u.must_change } };
@@ -279,7 +290,7 @@ export function createCore({ db, lamps, now = Date.now }) {
   // ---------- вход/выход, профиль ----------
 
   route('POST', '/api/logout', 'staff', async (c) => {
-    run('DELETE FROM auth_tokens WHERE token_hash=?', await sha(c.token));
+    sessions.remove(await sha(c.token));
     c.setToken = null;
     return { ok: true };
   });
@@ -681,7 +692,7 @@ export function createCore({ db, lamps, now = Date.now }) {
       if (id === c.user.id && !active) throw conflict('Нельзя отключить самого себя');
       if (!active && q1('SELECT 1 x FROM shifts WHERE closed_at IS NULL AND user_id=?', id)) throw conflict('У сотрудника открыта смена');
       run('UPDATE users SET name=?, role=?, active=? WHERE id=?', name, role, active, id);
-      if (!active || role !== u.role) run('DELETE FROM auth_tokens WHERE user_id=?', id);
+      if (!active || role !== u.role) sessions.removeUser(id);
       audit(c.user.id, 'user.update', { id, name, role, active });
     });
     return { ok: true };
@@ -691,7 +702,7 @@ export function createCore({ db, lamps, now = Date.now }) {
     const id = +c.params.id;
     if (!q1('SELECT id FROM users WHERE id=?', id)) throw notFound('Сотрудник не найден');
     run('UPDATE users SET pin_hash=?, must_change=1 WHERE id=?', await hashPin(c.body.pin), id);
-    run('DELETE FROM auth_tokens WHERE user_id=?', id);
+    sessions.removeUser(id);
     audit(c.user.id, 'user.pin_reset', { id });
     return { ok: true };
   });
@@ -744,8 +755,9 @@ export function createCore({ db, lamps, now = Date.now }) {
   /** Пользователь по токену сессии (или null). */
   async function authenticate(token) {
     if (!token) return null;
-    const row = q1('SELECT u.*, a.expires_at FROM auth_tokens a JOIN users u ON u.id=a.user_id WHERE a.token_hash=? AND u.active=1', await sha(token));
-    return row && row.expires_at >= now() ? row : null;
+    const sess = sessions.find(await sha(token));
+    if (!sess || sess.expires_at < now()) return null;
+    return q1('SELECT * FROM users WHERE id=? AND active=1', sess.user_id) || null;
   }
 
   async function dispatch({ method, path, query = {}, body = {}, headers = {}, token = null }) {
