@@ -4,9 +4,14 @@
   "description": "Учёт бильярдного клуба: столы, бар, смены, оплаты",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.150.0"
   }
 }

@@ -166,6 +166,7 @@ export function initDb(db) {
 }
 
 export function tx(db, fn) {
+  if (db.transactionSync) return db.transactionSync(fn); // Durable Object: BEGIN/COMMIT вручную запрещены
   db.exec('BEGIN IMMEDIATE');
   try {
     const r = fn();
