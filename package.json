@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "cf:dev": "wrangler dev --local",
+    "cf:deploy": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^4.150.0"
